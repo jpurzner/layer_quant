@@ -1,0 +1,453 @@
+---
+title: "Cerebellar layer quantification — example analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Overview
+
+This notebook demonstrates the full analysis pipeline using **simulated data**.
+Replace the `simulate_cerebellar_image()` calls and the genotype mapping with your
+own `.tif` files and sample metadata to run on real data.
+
+The pipeline produces depth-resolved intensity profiles across the cerebellar
+cortex and compares them between two experimental groups.
+
+## Install / load packages
+
+```{r packages, eval=FALSE}
+install.packages(c(
+  "dplyr", "tidyr", "ggplot2", "patchwork",
+  "stringr", "zoo", "pracma",
+  "RColorBrewer", "ggrepel", "ggsignif",
+  "lme4", "lmerTest"
+))
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("EBImage")
+```
+
+```{r load_packages}
+library(EBImage)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(stringr)
+library(zoo)
+```
+
+## Source helper functions
+
+All helper functions live in the same directory as this notebook.
+
+```{r source_functions}
+source("align_folia_images_connect.R")
+source("classify_connectivity_segments.R")
+source("elg_igl_normalize.R")
+source("pia_prunner.R")
+source("plot_layer_boundary2.R")
+```
+
+---
+
+## Part 1 — Simulate example images
+
+The function below creates synthetic three-channel TIFF files that mimic the
+structure of a P7 cerebellar cortex cross-section:
+
+- **DAPI** (channel 1): elevated in EGL (rows 50–120) and IGL (rows 280–380)
+- **p27** (channel 2): peaks at the EGL/ML boundary (~row 80), low elsewhere
+- **NeuN** (channel 3): low in EGL, peaks in IGL
+
+Row 0 corresponds to the pial surface; higher row numbers = deeper layers.
+
+In real data, replace this section with your own `.tif` files in a directory.
+
+```{r simulate_data}
+pixel_width <- 0.5119  # micrometers per pixel (adjust for your objective)
+
+simulate_cerebellar_image <- function(n_rows    = 500,
+                                      n_cols    = 600,
+                                      noise_sd  = 0.03,
+                                      pia_offset = 0) {
+  rows <- seq_len(n_rows) + pia_offset
+
+  # Gaussian bump helper
+  bump <- function(x, centre, width, height)
+    height * exp(-0.5 * ((x - centre) / width)^2)
+
+  # --- DAPI: two dense nuclear layers (EGL + IGL) ---
+  dapi <- bump(rows,  85, 30, 0.8) +   # EGL
+          bump(rows, 330, 50, 0.9) +   # IGL
+          0.15 + rnorm(n_rows, 0, noise_sd)
+
+  # --- p27: marks post-mitotic cells, peaks at EGL/ML boundary ---
+  p27  <- bump(rows,  80, 20, 0.9) +
+          bump(rows, 160, 40, 0.3) +   # faint ML signal
+          0.05 + rnorm(n_rows, 0, noise_sd)
+
+  # --- NeuN: mature neurons, peaks in IGL / Purkinje layer ---
+  neun <- bump(rows, 200, 25, 0.5) +   # Purkinje layer
+          bump(rows, 320, 55, 0.9) +   # IGL
+          0.05 + rnorm(n_rows, 0, noise_sd)
+
+  # Clamp to [0, 1] and build an EBImage multi-frame object
+  clamp <- function(x) pmax(0, pmin(1, x))
+
+  # Each frame is n_rows × n_cols; columns are uniform (same profile per column)
+  make_frame <- function(profile) {
+    mat <- matrix(clamp(profile), nrow = n_rows, ncol = n_cols)
+    mat + matrix(rnorm(n_rows * n_cols, 0, noise_sd / 3),
+                 nrow = n_rows, ncol = n_cols)
+  }
+
+  img <- EBImage::combine(
+    Image(make_frame(dapi)),
+    Image(make_frame(p27)),
+    Image(make_frame(neun))
+  )
+  img
+}
+
+# Write simulated images to a temporary directory -------------------------
+sim_dir <- file.path(tempdir(), "sim_images")
+dir.create(sim_dir, showWarnings = FALSE)
+
+set.seed(42)
+
+mouse_info <- data.frame(
+  mouse_id  = c("M1", "M2", "M3", "M4", "M5", "M6"),
+  genotype  = c("WT", "WT", "WT", "KO", "KO", "KO"),
+  pia_noise = c(0, 3, -2, 1, -3, 2)   # small random pia offsets per animal
+)
+
+for (i in seq_len(nrow(mouse_info))) {
+  for (fol in c("folium_a", "folium_b")) {
+    img  <- simulate_cerebellar_image(pia_offset = mouse_info$pia_noise[i])
+    fname <- file.path(sim_dir,
+                       sprintf("%s_%s_%s.tif",
+                               mouse_info$genotype[i],
+                               mouse_info$mouse_id[i],
+                               fol))
+    writeImage(img, fname)
+  }
+}
+
+cat("Simulated images written to:", sim_dir, "\n")
+list.files(sim_dir)
+```
+
+---
+
+## Part 2 — Load images and compute row statistics
+
+`align_folia_images_connect()` loads every `.tif` in the directory, computes
+row-wise statistics per column segment, then aligns all image strips to the one
+with the highest average cross-correlation to the rest.
+
+**Real data:** point `sim_dir` at your own directory of pre-cropped TIFF strips.
+
+```{r load_images}
+aligned_data <- align_folia_images_connect(
+  sim_dir,
+  frame_names          = c("DAPI", "p27", "NeuN"),
+  reference_frame      = "DAPI",
+  pixel_segment_length = 200
+)
+
+cat("Rows in aligned data:", nrow(aligned_data), "\n")
+cat("Channels:", unique(aligned_data$Frame), "\n")
+cat("Files loaded:", length(unique(aligned_data$filename)), "\n")
+```
+
+---
+
+## Part 3 — Attach genotype metadata
+
+Parse the animal identifier out of the filename and join the genotype table.
+
+**Real data:** replace the `str_extract` pattern with whatever identifies your
+animals in your filenames.
+
+```{r genotyping}
+# Extract mouse ID from filename  (pattern: GENOTYPE_MOUSEID_FOLIUM_segment_N)
+aligned_data <- aligned_data |>
+  mutate(
+    mouse_id = str_extract(filename, "(?<=_)(M\\d)(?=_)"),
+    genotype = str_extract(filename, "^(WT|KO)")
+  )
+
+cat("Genotype breakdown:\n")
+aligned_data |>
+  distinct(filename, genotype, mouse_id) |>
+  count(genotype, mouse_id) |>
+  print()
+```
+
+---
+
+## Part 4 — Quality filtering
+
+Keep only image strips that align well to the reference (MaxCorrelation > 0.5).
+
+```{r qc_filter}
+# Plot correlation distribution to choose threshold
+aligned_data |>
+  distinct(filename, Frame, MaxCorrelation) |>
+  filter(Frame == "DAPI") |>
+  ggplot(aes(x = MaxCorrelation)) +
+  geom_histogram(binwidth = 0.05, fill = "steelblue", colour = "white") +
+  geom_vline(xintercept = 0.5, linetype = "dashed", colour = "red") +
+  labs(title = "Cross-correlation quality filter",
+       x = "Max correlation to reference image",
+       y = "Number of image strips") +
+  theme_minimal()
+
+filtered_data <- aligned_data |> filter(MaxCorrelation > 0.5)
+cat("Strips remaining after QC:", length(unique(filtered_data$filename)), "\n")
+```
+
+---
+
+## Part 5 — Prune sparsely covered rows
+
+Remove row positions that are not covered by at least 80% of image strips. This
+trims the ends where only a few images contribute, which would otherwise produce
+noisy averages.
+
+```{r prune_rows}
+min_relative_coverage <- 0.8
+
+row_coverage <- filtered_data |>
+  group_by(Row) |>
+  summarise(n_files = n_distinct(filename),
+            rel_coverage = n_files / max(n_files)) |>
+  filter(rel_coverage >= min_relative_coverage)
+
+pruned_data <- filtered_data |>
+  inner_join(row_coverage, by = "Row")
+
+cat("Row range after pruning:", range(pruned_data$Row), "\n")
+```
+
+---
+
+## Part 6 — Shift to common origin
+
+Find the local minimum of the average p27 profile (corresponds to the pial
+surface / EGL peak transition) and shift all data so this point is at Row = 0.
+
+```{r shift_origin}
+# Average p27 profile across all strips
+avg_p27 <- pruned_data |>
+  filter(Frame == "p27") |>
+  group_by(Row) |>
+  summarise(AvgRowMean = mean(RowMean, na.rm = TRUE))
+
+find_local_minimum <- function(data) {
+  diffs <- diff(data$AvgRowMean)
+  change_points <- which(diffs[-1] > 0 & diffs[-length(diffs)] < 0)
+  centre <- nrow(data) / 2
+  change_points[which.min(abs(change_points - centre))]
+}
+
+origin_row <- find_local_minimum(avg_p27)
+cat("Origin row (p27 local minimum):", origin_row, "\n")
+
+shifted_data <- pruned_data |>
+  mutate(Row_shift = Row - origin_row,
+         Row_micron = Row_shift * pixel_width)
+```
+
+---
+
+## Part 7 — Split at origin and flip negative side
+
+Each image strip contributes signal on both sides of the pial reference point.
+We split the data at Row_shift = 0, flip the negative side to positive, and
+stack both halves — doubling the number of profile replicates.
+
+```{r split_halves}
+neg_half <- shifted_data |>
+  filter(Row_shift <= 0) |>
+  mutate(Row_shift = abs(Row_shift),
+         xpslit    = "negative")
+
+pos_half <- shifted_data |>
+  filter(Row_shift >= 0) |>
+  mutate(xpslit = "positive")
+
+split_data <- bind_rows(neg_half, pos_half)
+```
+
+---
+
+## Part 8 — Per-strip intensity rescaling
+
+Rescale each strip to its own 5th–95th percentile range. This corrects for
+differences in overall staining intensity between sections and animals.
+
+```{r rescale}
+rescaled_data <- split_data |>
+  group_by(Frame, filename, xpslit) |>
+  mutate(
+    RescaledIntensity = (RowMean - quantile(RowMean, 0.05, na.rm = TRUE)) /
+      (quantile(RowMean, 0.95, na.rm = TRUE) -
+         quantile(RowMean, 0.05, na.rm = TRUE)) * 100
+  ) |>
+  ungroup()
+```
+
+---
+
+## Part 9 — EGL / IGL normalization
+
+Normalize using the EGL (high) and molecular layer (low) as anatomical anchors.
+This produces `RescaledIntensityInRange`, which is directly comparable across
+experiments imaged at different times or on different microscopes.
+
+```{r normalize}
+# Need Row_shift_scale column name for egl_igl_normalize()
+rescaled_data <- rescaled_data |> rename(Row_shift_scale = Row_shift)
+
+normalized_data <- egl_igl_normalize(
+  rescaled_data,
+  DAPI_max_site = "igl",   # IGL is the dense nuclear layer at P7
+  smooth        = TRUE
+)
+```
+
+---
+
+## Part 10 — Remove strips lacking IGL signal
+
+Strips where the smoothed p27 peak in the first 150 pixels exceeds ~200% of
+the normalized scale typically lack IGL tissue and would have distorted
+normalization. Inspect the histogram and adjust the threshold for your data.
+
+```{r remove_high}
+max_egl <- normalized_data |>
+  filter(Frame == "p27", Row_shift_scale <= 150) |>
+  group_by(filename, xpslit) |>
+  mutate(smoothed = zoo::rollmean(RescaledIntensityInRange, k = 10, fill = NA)) |>
+  summarise(MaxSmoothed = max(smoothed, na.rm = TRUE), .groups = "drop")
+
+ggplot(max_egl, aes(x = MaxSmoothed)) +
+  geom_histogram(bins = 30, fill = "steelblue", colour = "white") +
+  geom_vline(xintercept = 200, linetype = "dashed", colour = "red") +
+  labs(title = "Peak p27 intensity — filter strips above threshold",
+       x = "Max smoothed p27 (first 150 px)",
+       y = "Count") +
+  theme_minimal()
+
+high_tracks <- max_egl |> filter(MaxSmoothed > 200) |> select(filename, xpslit)
+normalized_data <- anti_join(normalized_data, high_tracks,
+                              by = c("filename", "xpslit"))
+cat("Strips after IGL filter:", length(unique(normalized_data$filename)), "\n")
+```
+
+---
+
+## Part 11 — Detect and trim pial boundary
+
+`pia_prunner()` finds the position of the pial surface in each strip from the
+joint drop in p27 and NeuN signal. The output `peak_position` is the pixel
+offset to subtract so that position 0 = true pial surface.
+
+```{r pia_trim}
+pia_peaks <- pia_prunner(normalized_data)
+
+pia_aligned <- normalized_data |>
+  left_join(pia_peaks |> select(filename, xpslit, peak_position),
+            by = c("filename", "xpslit")) |>
+  mutate(
+    AlignedRow       = Row_shift_scale - peak_position,
+    AlignedRow_micron = AlignedRow * pixel_width
+  )
+
+# Quick sanity check: all strips aligned?
+pia_aligned |>
+  filter(Frame == "p27") |>
+  ggplot(aes(x = AlignedRow_micron, y = RescaledIntensityInRange,
+             group = paste0(filename, xpslit))) +
+  geom_line(alpha = 0.15, colour = "black") +
+  stat_summary(aes(group = genotype, colour = genotype),
+               fun = mean, geom = "line", linewidth = 1) +
+  xlim(0, 200) +
+  labs(title = "p27 profiles after pial alignment",
+       x = "Distance from pial surface (µm)",
+       y = "Normalized p27 intensity") +
+  theme_minimal()
+```
+
+---
+
+## Part 12 — Build metadata table for biological replicates
+
+The statistical tests in `plot_layer_boundary2()` average over sections from
+the same animal before comparing groups. We need a table that maps each
+filename back to its mouse ID.
+
+**Real data:** construct `extra_anno` from your own filename structure.
+
+```{r metadata}
+extra_anno <- pia_aligned |>
+  distinct(filename, xpslit, mouse_id, genotype) |>
+  rename(Mouse = mouse_id)
+```
+
+---
+
+## Part 13 — Final publication figure
+
+`plot_layer_boundary2()` assembles three panels:
+
+1. Individual strip profiles (faint) with group averages coloured by genotype
+2. Average intensity difference (KO − WT) across position
+3. Violin plots at the positions of maximum and minimum group difference,
+   with biological replicate means overlaid and a t-test p-value
+
+```{r final_figure, fig.height=9, fig.width=5}
+fig <- plot_layer_boundary2(
+  data             = pia_aligned,
+  sel_frame        = "p27",
+  x_col_name       = "AlignedRow_micron",
+  y_col_name       = "RescaledIntensityInRange",
+  x_min            = 0,
+  x_max            = 150,
+  y_min            = 0,
+  y_max            = 150,
+  comparison_order = c("WT", "KO"),
+  biological_rep   = "Mouse",
+  metadata         = extra_anno,
+  stat             = "ttest"
+)
+
+print(fig)
+```
+
+---
+
+## Pixel width reference
+
+| Objective | Pixel width (µm) |
+|-----------|-----------------|
+| 20×       | 0.5119          |
+| 10×       | 1.0238 (scale ×2 relative to 20×) |
+
+When combining datasets acquired on different objectives, multiply the 10×
+`Row_shift` values by 2 before merging so that all positions are in equivalent
+20× pixel units, then convert to microns.
+
+---
+
+## Session info
+
+```{r session_info}
+sessionInfo()
+```
