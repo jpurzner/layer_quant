@@ -153,9 +153,46 @@ Removes image strips where the smoothed p27 intensity in the first 150 pixels ex
 
 Diagnostic plot for multi-changepoint (MCP) model fits. Draws the fitted piecewise-linear segments on top of the raw intensity profile for a single image strip. Used to inspect the quality of changepoint-based layer boundary detection.
 
+## Example output
+
+Generated from two real P7 mouse cerebellar sections included in `example_data/`
+(one WT, one Ezh2 cKO; both 20× images, pixel width 0.512 µm). See
+[`generate_example_figures.R`](generate_example_figures.R) for the code that
+produced these.
+
+### Raw images — p27, NeuN, DAPI (pial surface at top)
+![Raw images](figures/fig1_raw_images.png)
+
+### Raw row-mean intensity profiles
+Profiles before alignment or normalisation. The two images are not yet shifted
+to a common origin.
+
+![Raw profiles](figures/fig2_raw_profiles.png)
+
+### EGL/IGL-normalised profiles after alignment
+After shifting both images to the p27 local minimum and normalising intensity
+using the EGL (high) and molecular layer (low) as anatomical anchors.
+
+![Normalized profiles](figures/fig3_normalized_profiles.png)
+
+### Effect of normalisation strategy on p27
+Comparison of raw, per-strip (5–95th percentile), and EGL/IGL-anchored
+normalisation for the p27 channel.
+
+![Normalization comparison](figures/fig5_p27_normalization_comparison.png)
+
+### DAPI connectivity metrics
+Row-wise density of small connected components (proxy for nucleus count) and
+fraction of pixels above the Otsu threshold, derived from connected-component
+labelling.
+
+![Connectivity metrics](figures/fig4_connectivity_metrics.png)
+
+---
+
 ## Usage example
 
-See [`example_analysis.Rmd`](example_analysis.Rmd) for a complete worked example using simulated data.
+See [`example_analysis.Rmd`](example_analysis.Rmd) for a complete worked example using the included images.
 
 Quick start with your own data:
 

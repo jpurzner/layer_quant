@@ -10,16 +10,18 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 ## Overview
 
 This notebook walks through the full pipeline using two real example images
-included in `example_data/`. One image is from a WT animal (20x, dataset 1)
-and one from an Ezh2 cKO animal (10x, dataset 2).
+included in `example_data/`:
+
+| File | Mouse | Genotype | Objective |
+|------|-------|----------|-----------|
+| `2018_05_22_s2_3_p27-0025_fused_crop_3_4.tif` | M3 | WT | 20× (0.512 µm/px) |
+| `2018_05_22_s3_5_p27-0006_fused_crop_3_4.tif` | M5 | Ezh2 cKO | 20× (0.512 µm/px) |
+
+Channel order in both files: **frame 1 = p27, frame 2 = NeuN, frame 3 = DAPI**.
 
 A complete between-genotype comparison requires multiple animals and sections
-per group — the structure here is identical; just point the directory paths at
-your full image sets and fill in the genotype mapping for your filenames.
-
-Each `.tif` is a three-channel image: the pial surface is at the top (low row
-index) and deeper layers are toward the bottom. Channel order differs between
-the two datasets (see the `frame_names` argument below).
+per group — the structure here is identical; just point the directory path at
+your full image set and fill in the genotype mapping for your filenames.
 
 ## Install / load packages
 
@@ -58,8 +60,8 @@ source("plot_layer_boundary2.R")
 ## Quick look at the example images
 
 ```{r view_images, fig.height=4, fig.width=9}
-img_wt  <- readImage("example_data/2018_05_22_s3_5_p27-0006_fused_crop_3_4.tif")
-img_ko  <- readImage("example_data/s6_E_p27_cor_merge_crop-5_6B.tif")
+img_wt  <- readImage("example_data/2018_05_22_s2_3_p27-0025_fused_crop_3_4.tif")
+img_ko  <- readImage("example_data/2018_05_22_s3_5_p27-0006_fused_crop_3_4.tif")
 
 cat("WT image  — dimensions (rows × cols × channels):", dim(img_wt), "\n")
 cat("KO image  — dimensions (rows × cols × channels):", dim(img_ko), "\n")
@@ -95,12 +97,17 @@ aligned_ds1 <- align_folia_images_connect(
   pixel_segment_length = 200
 )
 
-# Attach genotype — for the example image mouse 3 = WT
-# In a full analysis, build this table from all filenames
+# Position 15 of the filename encodes the mouse number;
+# mouse 3 = WT, mouse 5 = Ezh2 cKO (from study genotyping).
+# In a full analysis, build this mapping from all filenames.
 aligned_ds1 <- aligned_ds1 |>
   mutate(
-    mouse_id = "M3",
-    genotype = "WT",
+    mouse_id = paste0("M", substr(filename, 15, 15)),
+    genotype = case_when(
+      substr(filename, 15, 15) == "3" ~ "WT",
+      substr(filename, 15, 15) == "5" ~ "Ezh2 cKO",
+      TRUE ~ "unknown"
+    ),
     dataset  = 1L
   )
 
