@@ -181,6 +181,15 @@ normalisation for the p27 channel.
 
 ![Normalization comparison](figures/fig5_p27_normalization_comparison.png)
 
+### NeuN and p27 comparison — reviewer analysis
+
+NeuN marks mature neurons and should be low in the EGL at P7. The plot below
+shows both channels on the same spatial scale to assess whether NeuN is
+elevated closer to the pial surface in the Ezh2 cKO, which would indicate
+premature cell cycle exit and early differentiation.
+
+![NeuN p27 comparison](figures/fig6_NeuN_p27_comparison.png)
+
 ### DAPI connectivity metrics
 Row-wise density of small connected components (proxy for nucleus count) and
 fraction of pixels above the Otsu threshold, derived from connected-component

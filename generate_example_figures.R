@@ -294,4 +294,69 @@ fig5 <- make_panel("RowMean",               "RowMean",               "Raw intens
 ggsave("figures/fig5_p27_normalization_comparison.png", fig5, width = 10, height = 4, dpi = 150)
 message("  saved figures/fig5_p27_normalization_comparison.png")
 
+# ── Figure 6: NeuN profiles — same analysis as p27 ───────────────────────────
+# The reviewer asked whether NeuN+ cells exit the EGL prematurely in cKO.
+# NeuN should be low in the EGL (NeuN− precursors) and high in the IGL
+# (mature granule cells). Elevation of NeuN near the pial surface in cKO
+# would indicate premature differentiation.
+message("Fig 6: NeuN EGL profiles")
+
+avg_neun <- normalized |>
+  filter(Frame == "NeuN") |>
+  mutate(Row_micron = Row_shift_scale * pixel_width) |>
+  group_by(Row_micron, genotype) |>
+  summarise(avg = mean(RescaledIntensityInRange, na.rm = TRUE), .groups = "drop")
+
+strip_neun <- normalized |>
+  filter(Frame == "NeuN") |>
+  mutate(Row_micron = Row_shift_scale * pixel_width)
+
+avg_p27_comp2 <- normalized |>
+  filter(Frame == "p27") |>
+  mutate(Row_micron = Row_shift_scale * pixel_width) |>
+  group_by(Row_micron, genotype) |>
+  summarise(avg = mean(RescaledIntensityInRange, na.rm = TRUE), .groups = "drop")
+
+strip_p27_comp2 <- normalized |>
+  filter(Frame == "p27") |>
+  mutate(Row_micron = Row_shift_scale * pixel_width)
+
+make_channel_panel <- function(strip_df, avg_df, title, ylabel) {
+  ggplot() +
+    geom_line(data = strip_df,
+              aes(x = Row_micron, y = RescaledIntensityInRange,
+                  group = paste0(filename, xpslit), colour = genotype),
+              alpha = 0.15, linewidth = 0.4) +
+    geom_line(data = avg_df,
+              aes(x = Row_micron, y = avg,
+                  colour = genotype, group = genotype),
+              linewidth = 1.3) +
+    scale_colour_manual(values = genotype_colors) +
+    coord_cartesian(xlim = c(0, 150)) +
+    labs(title = title, x = "Distance from p27 minimum (µm)",
+         y = ylabel, colour = "Genotype") +
+    theme_minimal(base_size = 10) +
+    theme(legend.position = "bottom",
+          plot.title = element_text(face = "bold", size = 10))
+}
+
+p6a <- make_channel_panel(strip_p27_comp2, avg_p27_comp2,
+                          "p27 — cell cycle exit marker",
+                          "Normalized p27 intensity")
+p6b <- make_channel_panel(strip_neun, avg_neun,
+                          "NeuN — mature neuron marker",
+                          "Normalized NeuN intensity")
+
+fig6 <- p6a + p6b +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom") &
+  plot_annotation(
+    title    = "p27 and NeuN intensity across cerebellar cortical depth",
+    subtitle = "If Ezh2 cKO accelerates differentiation, NeuN should be elevated\ncloser to the pial surface (lower x) in the cKO relative to WT",
+    caption  = "Single image per group; for illustration only"
+  )
+
+ggsave("figures/fig6_NeuN_p27_comparison.png", fig6, width = 10, height = 5, dpi = 150)
+message("  saved figures/fig6_NeuN_p27_comparison.png")
+
 message("\nAll figures saved to figures/")
